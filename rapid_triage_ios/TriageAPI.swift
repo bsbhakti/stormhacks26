@@ -1,15 +1,27 @@
 import Foundation
 
 enum TriageServerConfig {
-    /// Point this at the machine running `server/triage_server.py`.
+    /// Point this at the machine running `backend_serv/server.py`.
     /// Use the Mac's LAN address for a physical iPhone, not localhost.
     static let baseURL = URL(string: "http://172.16.205.106:5000")!
+}
+
+/// Patient care stage stored by the backend and sent to the ESP.
+enum PatientCareStatus: Int, Codable {
+    /// Available / back on the monitoring queue.
+    case monitoring = 0
+    /// A responder is on the way.
+    case finding = 1
+    /// The responder is with the patient.
+    case found = 2
+    /// Removed from the active queue.
+    case stopped = 3
 }
 
 struct PatientAssignment: Codable, Equatable {
     var id: String
     var name: String
-    var status: Int?
+    var status: PatientCareStatus?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -19,16 +31,20 @@ struct PatientAssignment: Codable, Equatable {
         case advertisedName
     }
 
-    init(id: String, name: String) {
+    init(id: String, name: String, status: PatientCareStatus? = nil) {
         self.id = id
         self.name = name
-        self.status = nil
+        self.status = status
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
-        status = try container.decodeIfPresent(Int.self, forKey: .status)
+        if let rawStatus = try container.decodeIfPresent(Int.self, forKey: .status) {
+            status = PatientCareStatus(rawValue: rawStatus)
+        } else {
+            status = nil
+        }
         if let name = try container.decodeIfPresent(String.self, forKey: .name) {
             self.name = name
         } else if let name = try container.decodeIfPresent(String.self, forKey: .tagName) {
@@ -42,12 +58,8 @@ struct PatientAssignment: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(status?.rawValue, forKey: .status)
     }
-}
-
-enum PatientOutcome: String, Codable {
-    case helped
-    case needsFurtherHelp = "needs_further_help"
 }
 
 struct TriageAPIError: LocalizedError {
@@ -59,38 +71,47 @@ struct TriageAPIError: LocalizedError {
 
 enum TriageAPI {
     static func nextAssignment() async throws -> PatientAssignment {
-        let assignment = try await send(
+        var assignment = try await send(
             path: "/assignments/next",
             method: "POST",
             body: nil as Data?,
             as: PatientAssignment.self
         )
-        let name = AdvertisedName.normalized(assignment.name)
-        guard !name.isEmpty else { throw TriageAPIError.missingName }
-        return PatientAssignment(id: assignment.id, name: name)
-    }
-
-    static func completeAssignment(id: String, outcome: PatientOutcome) async throws {
-        struct Payload: Encodable {
-            let continueMonitoring: Bool
-        }
-        struct OK: Decodable {}
-
-        _ = try await send(
-            path: "/assignments/\(id)/complete",
-            method: "POST",
-            body: Payload(continueMonitoring: outcome == .needsFurtherHelp),
-            as: OK.self
-        )
+        assignment.name = AdvertisedName.normalized(assignment.name)
+        assignment.status = assignment.status ?? .finding
+        guard !assignment.name.isEmpty else { throw TriageAPIError.missingName }
+        return assignment
     }
 
     static func markAssignmentFound(id: String) async throws {
-        struct OK: Decodable {}
+        try await updateStatus(id: id, status: .found)
+    }
+
+    static func completeAssignment(id: String, status: PatientCareStatus) async throws {
+        guard status == .monitoring || status == .stopped else {
+            throw TriageAPIError(errorDescription: "Finished care must set status 0 or 3.")
+        }
+        try await updateStatus(id: id, status: status)
+    }
+
+    static func updateStatus(id: String, status: PatientCareStatus) async throws {
+        struct Payload: Encodable {
+            let status: Int
+        }
+        struct Response: Decodable {
+            let id: String
+            let status: Int?
+        }
+
+        let path = status == .found
+            ? "/assignments/\(id)/found"
+            : "/assignments/\(id)/status"
+        let body = status == .found ? nil : Payload(status: status.rawValue)
         _ = try await send(
-            path: "/assignments/\(id)/found",
+            path: path,
             method: "POST",
-            body: nil as Data?,
-            as: OK.self
+            body: body,
+            as: Response.self
         )
     }
 
@@ -119,7 +140,7 @@ enum TriageAPI {
             request.httpBody = try JSONEncoder().encode(body)
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw TriageAPIError(errorDescription: serverMessage(from: data, response: response))
         }
@@ -131,8 +152,7 @@ enum TriageAPI {
     }
 
     private static func serverMessage(from data: Data, response: URLResponse) -> String {
-        if let http = response as? HTTPURLResponse,
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let message = object["error"] as? String {
             return message
         }

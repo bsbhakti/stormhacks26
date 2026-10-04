@@ -109,12 +109,16 @@ struct FinderView: View {
             metrics
             guidance
             Spacer(minLength: 8)
-            Button("Found patient") {
+            if manager.isUpdatingServer {
+                ProgressView("Updating server…")
+            }
+            Button(manager.isUpdatingServer ? "Updating…" : "Found patient") {
                 manager.markPatientFound()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(Color(red: 0.22, green: 0.72, blue: 0.42))
+            .disabled(manager.isUpdatingServer)
             .padding(.bottom, 16)
         }
         .padding(.horizontal, 20)
@@ -132,10 +136,17 @@ struct FinderView: View {
         VStack(spacing: 6) {
             Text(manager.trackedDevice?.displayName ?? manager.targetAdvertisedName)
                 .font(.title2.weight(.semibold))
-            Text(manager.statusMessage)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            if let serverError = manager.serverError {
+                Text(serverError)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text(manager.statusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(.top, 8)
     }
@@ -277,7 +288,7 @@ struct AssistingPatientView: View {
                 }
             }
 
-            Text("Assess, treat, and mark the outcome when you can leave this patient.")
+            Text("When you are done, put this patient back on the monitoring queue or stop monitoring.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -296,16 +307,16 @@ struct AssistingPatientView: View {
             Spacer()
 
             VStack(spacing: 12) {
-                Button("Patient helped") {
-                    manager.finishAssistance(outcome: .helped)
+                Button("Put back in monitoring") {
+                    manager.finishAssistance(status: .monitoring)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .tint(Color(red: 0.22, green: 0.72, blue: 0.42))
                 .disabled(manager.isUpdatingServer)
 
-                Button("Needs further help") {
-                    manager.finishAssistance(outcome: .needsFurtherHelp)
+                Button("Stop monitoring") {
+                    manager.finishAssistance(status: .stopped)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)

@@ -75,15 +75,23 @@ def run_flow(base_url: str) -> None:
 
     _, continued = request_json(
         base_url,
-        f"/assignments/{assignment_id}/complete",
-        body={"continue_monitoring": True},
+        f"/assignments/{assignment_id}/status",
+        body={"status": 0},
     )
-    expect_status(continued, 2, "continue monitoring")
+    expect_status(continued, 0, "put back in monitoring")
+
+    _, finding_again = request_json(
+        base_url,
+        f"/assignments/{assignment_id}/status",
+        body={"status": 1},
+    )
+    expect_status(finding_again, 1, "resume finding")
+    request_json(base_url, f"/assignments/{assignment_id}/found")
 
     _, completed = request_json(
         base_url,
         f"/assignments/{assignment_id}/complete",
-        body={"continue_monitoring": False},
+        body={"status": 3},
     )
     expect_status(completed, 3, "stop monitoring")
 

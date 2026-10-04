@@ -109,34 +109,15 @@ final class BLEProximityManager: NSObject {
     }
 
     func markPatientFound() {
-        assistingPatientName = trackedDevice?.displayName ?? targetAdvertisedName
-        assistanceStartedAt = Date()
-        endLocationSession()
-        phase = .assisting
-        statusMessage = assistingPatientName.isEmpty
-            ? "Assisting patient"
-            : "Assisting \(assistingPatientName)"
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        Task {
-            do {
-                if let currentAssignment {
-                    try await TriageAPI.markAssignmentFound(id: currentAssignment.id)
-                }
-            } catch {
-                await MainActor.run {
-                    serverError = error.localizedDescription
-                    statusMessage = "Patient found, but the server was not updated."
-                }
-            }
-        }
+        Task { await confirmPatientFound() }
     }
 
     func findPatient() {
         Task { await requestNextPatient() }
     }
 
-    func finishAssistance(outcome: PatientOutcome) {
-        Task { await completeAssistance(outcome: outcome) }
+    func finishAssistance(status: PatientCareStatus) {
+        Task { await completeAssistance(status: status) }
     }
 
     private func requestNextPatient() async {
@@ -150,7 +131,7 @@ final class BLEProximityManager: NSObject {
             let assignment = try await TriageAPI.nextAssignment()
             currentAssignment = assignment
             nameFilter = assignment.name
-            statusMessage = "Looking for tag “\(assignment.name)”"
+            statusMessage = "Looking for tag “\(assignment.name)” · status 1"
             phase = .locating
             if canScan {
                 startScan()
@@ -161,7 +142,34 @@ final class BLEProximityManager: NSObject {
         }
     }
 
-    private func completeAssistance(outcome: PatientOutcome) async {
+    private func confirmPatientFound() async {
+        guard phase == .locating, !isUpdatingServer else { return }
+        isUpdatingServer = true
+        serverError = nil
+        statusMessage = "Marking patient found…"
+        defer { isUpdatingServer = false }
+
+        do {
+            guard let currentAssignment else {
+                throw TriageAPIError(errorDescription: "No assignment to update.")
+            }
+            try await TriageAPI.markAssignmentFound(id: currentAssignment.id)
+            self.currentAssignment?.status = .found
+            assistingPatientName = trackedDevice?.displayName ?? targetAdvertisedName
+            assistanceStartedAt = Date()
+            endLocationSession()
+            phase = .assisting
+            statusMessage = assistingPatientName.isEmpty
+                ? "Assisting patient · status 2"
+                : "Assisting \(assistingPatientName) · status 2"
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } catch {
+            serverError = error.localizedDescription
+            statusMessage = "Could not set status 2 on the server. Try Found again."
+        }
+    }
+
+    private func completeAssistance(status: PatientCareStatus) async {
         guard phase == .assisting, !isUpdatingServer else { return }
         isUpdatingServer = true
         serverError = nil
@@ -169,9 +177,10 @@ final class BLEProximityManager: NSObject {
         defer { isUpdatingServer = false }
 
         do {
-            if let currentAssignment {
-                try await TriageAPI.completeAssignment(id: currentAssignment.id, outcome: outcome)
+            guard let currentAssignment else {
+                throw TriageAPIError(errorDescription: "No assignment to update.")
             }
+            try await TriageAPI.completeAssignment(id: currentAssignment.id, status: status)
             returnToSearch()
         } catch {
             serverError = error.localizedDescription

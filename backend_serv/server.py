@@ -279,30 +279,54 @@ def assignment_found(assignment_id: str):
     return jsonify(result), 200
 
 
+@app.post("/assignments/<assignment_id>/status")
+def assignment_status(assignment_id: str):
+    data = request.get_json(silent=True) or {}
+    status = data.get("status")
+    if status not in {
+        STATUS_YET_TO_BE_HELPED,
+        STATUS_FINDING,
+        STATUS_FOUND,
+        STATUS_OUT_OF_QUEUE,
+    }:
+        return jsonify(error="status must be 0, 1, 2, or 3"), 400
+
+    result = _record_status(
+        assignment_id,
+        status,
+        "ios_status",
+        continue_monitoring=status == STATUS_YET_TO_BE_HELPED,
+    )
+    if result is None:
+        return jsonify(error="Unknown assignment"), 404
+    return jsonify(result), 200
+
+
 @app.post("/assignments/<assignment_id>/complete")
 def complete_assignment(assignment_id: str):
     data = request.get_json(silent=True) or {}
+    status = data.get("status")
     requeue = data.get("requeue", False)
-    continue_monitoring = data.get("continue_monitoring", False)
-    if not isinstance(requeue, bool) or not isinstance(continue_monitoring, bool):
-        return jsonify(error="requeue and continue_monitoring must be booleans"), 400
-    if requeue and continue_monitoring:
-        return jsonify(
-            error="requeue and continue_monitoring cannot both be true"
-        ), 400
-
-    status = (
-        STATUS_YET_TO_BE_HELPED
-        if requeue
-        else STATUS_FOUND
-        if continue_monitoring
-        else STATUS_OUT_OF_QUEUE
+    continue_monitoring = data.get(
+        "continue_monitoring",
+        data.get("continueMonitoring", False),
     )
+    if status is None:
+        if not isinstance(requeue, bool) or not isinstance(continue_monitoring, bool):
+            return jsonify(error="requeue and continue_monitoring must be booleans"), 400
+        status = (
+            STATUS_YET_TO_BE_HELPED
+            if requeue or continue_monitoring
+            else STATUS_OUT_OF_QUEUE
+        )
+    if status not in {STATUS_YET_TO_BE_HELPED, STATUS_OUT_OF_QUEUE}:
+        return jsonify(error="complete status must be 0 or 3"), 400
+
     result = _record_status(
         assignment_id,
         status,
         "ios_complete",
-        continue_monitoring=continue_monitoring,
+        continue_monitoring=status == STATUS_YET_TO_BE_HELPED,
     )
     if result is None:
         return jsonify(error="Unknown assignment"), 404
