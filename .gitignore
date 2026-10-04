@@ -1,0 +1,6 @@
+# Local database credentials
+*.env
+*-credentials.txt
+
+__pycache__/
+.venv/

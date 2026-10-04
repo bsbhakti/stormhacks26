@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from backend.timescale_db import connect, initialize_schema
+from timescale_db import connect, initialize_schema
 
 
 SAMPLE_RATE_HZ = 250

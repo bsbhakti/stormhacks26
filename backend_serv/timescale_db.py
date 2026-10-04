@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 
-load_dotenv("tiger-cloud-stormhacks-db-credentials.env")
+load_dotenv(Path(__file__).with_name("tiger-cloud-stormhacks-db-credentials.env"))
 
 
 SCHEMA_SQL = """
