@@ -117,6 +117,18 @@ final class BLEProximityManager: NSObject {
             ? "Assisting patient"
             : "Assisting \(assistingPatientName)"
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        Task {
+            do {
+                if let currentAssignment {
+                    try await TriageAPI.markAssignmentFound(id: currentAssignment.id)
+                }
+            } catch {
+                await MainActor.run {
+                    serverError = error.localizedDescription
+                    statusMessage = "Patient found, but the server was not updated."
+                }
+            }
+        }
     }
 
     func findPatient() {

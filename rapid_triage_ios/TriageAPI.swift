@@ -3,16 +3,18 @@ import Foundation
 enum TriageServerConfig {
     /// Point this at the machine running `server/triage_server.py`.
     /// Use the Mac's LAN address for a physical iPhone, not localhost.
-    static let baseURL = URL(string: "http://172.16.205.106:8080")!
+    static let baseURL = URL(string: "http://172.16.205.106:5000")!
 }
 
 struct PatientAssignment: Codable, Equatable {
     var id: String
     var name: String
+    var status: Int?
 
     enum CodingKeys: String, CodingKey {
         case id
         case name
+        case status
         case tagName
         case advertisedName
     }
@@ -20,11 +22,13 @@ struct PatientAssignment: Codable, Equatable {
     init(id: String, name: String) {
         self.id = id
         self.name = name
+        self.status = nil
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        status = try container.decodeIfPresent(Int.self, forKey: .status)
         if let name = try container.decodeIfPresent(String.self, forKey: .name) {
             self.name = name
         } else if let name = try container.decodeIfPresent(String.self, forKey: .tagName) {
@@ -68,14 +72,24 @@ enum TriageAPI {
 
     static func completeAssignment(id: String, outcome: PatientOutcome) async throws {
         struct Payload: Encodable {
-            let status: PatientOutcome
+            let continueMonitoring: Bool
         }
         struct OK: Decodable {}
 
         _ = try await send(
             path: "/assignments/\(id)/complete",
             method: "POST",
-            body: Payload(status: outcome),
+            body: Payload(continueMonitoring: outcome == .needsFurtherHelp),
+            as: OK.self
+        )
+    }
+
+    static func markAssignmentFound(id: String) async throws {
+        struct OK: Decodable {}
+        _ = try await send(
+            path: "/assignments/\(id)/found",
+            method: "POST",
+            body: nil as Data?,
             as: OK.self
         )
     }
