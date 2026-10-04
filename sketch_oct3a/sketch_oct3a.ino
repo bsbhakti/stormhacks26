@@ -35,6 +35,8 @@ void setup() {
 }
 
 void loop() {
+    socket_loop();
+
   // Serial.println("Scanning...");
     // check_connected_dev();
     // delay(2000);

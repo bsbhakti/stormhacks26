@@ -4,6 +4,7 @@
 
 
 void socket_connect();
+void socket_loop();
 
 
 #endif
