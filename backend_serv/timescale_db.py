@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS public.health_readings (
     heart_rate_bpm DOUBLE PRECISION,
     spo2_percent DOUBLE PRECISION,
     temperature_c DOUBLE PRECISION,
+    contact BOOLEAN,
+    heart_rate_valid BOOLEAN NOT NULL DEFAULT FALSE,
+    spo2_valid BOOLEAN NOT NULL DEFAULT FALSE,
+    ecg_count INTEGER NOT NULL DEFAULT 0,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY (patient_id, recorded_at)
 );
@@ -85,6 +89,10 @@ class HealthReading:
     heart_rate_bpm: float | None = None
     spo2_percent: float | None = None
     temperature_c: float | None = None
+    contact: bool = False
+    heart_rate_valid: bool = False
+    spo2_valid: bool = False
+    ecg_count: int = 0
     ecg: list[float] | None = None
     metadata: Mapping[str, Any] | None = None
 
@@ -97,6 +105,10 @@ class HealthReading:
             self.heart_rate_bpm,
             self.spo2_percent,
             self.temperature_c,
+            self.contact,
+            self.heart_rate_valid,
+            self.spo2_valid,
+            self.ecg_count,
             Jsonb(dict(self.metadata or {})),
         )
 
@@ -118,16 +130,27 @@ def connect() -> psycopg.Connection[Any]:
 
 def initialize_schema() -> None:
     """Create the raw-reading table and hypertable if they do not exist."""
+    print("[DB] initializing schema", flush=True)
     with connect() as connection:
         with connection.cursor() as cursor:
             cursor.execute(SCHEMA_SQL)
+    print("[DB] schema initialized and committed", flush=True)
 
 
 def write_reading(reading: HealthReading) -> None:
     """Insert vitals and their ECG samples in one transaction."""
-    with connect() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
+    ecg_samples = reading.ecg or []
+    print(
+        "[DB] writing reading: "
+        f"patient_id={reading.patient_id} "
+        f"recorded_at={reading.recorded_at.isoformat()} "
+        f"ecg_samples={len(ecg_samples)}",
+        flush=True,
+    )
+    try:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
                 """
                 INSERT INTO public.health_readings (
                     recorded_at,
@@ -136,20 +159,32 @@ def write_reading(reading: HealthReading) -> None:
                     heart_rate_bpm,
                     spo2_percent,
                     temperature_c,
+                    contact,
+                    heart_rate_valid,
+                    spo2_valid,
+                    ecg_count,
                     metadata
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (patient_id, recorded_at) DO UPDATE SET
                     device_id = EXCLUDED.device_id,
                     heart_rate_bpm = EXCLUDED.heart_rate_bpm,
                     spo2_percent = EXCLUDED.spo2_percent,
                     temperature_c = EXCLUDED.temperature_c,
+                    contact = EXCLUDED.contact,
+                    heart_rate_valid = EXCLUDED.heart_rate_valid,
+                    spo2_valid = EXCLUDED.spo2_valid,
+                    ecg_count = EXCLUDED.ecg_count,
                     metadata = EXCLUDED.metadata
                 """,
                 reading.as_row(),
-            )
-            if reading.ecg:
-                cursor.executemany(
+                )
+                print(
+                    f"[DB] health_readings affected rows={cursor.rowcount}",
+                    flush=True,
+                )
+                if ecg_samples:
+                    cursor.executemany(
                     """
                     INSERT INTO public.ecg_samples (
                         recorded_at,
@@ -168,9 +203,24 @@ def write_reading(reading: HealthReading) -> None:
                         index,
                         sample,
                         )
-                    for index, sample in enumerate(reading.ecg)
-                    ]
-                )
+                        for index, sample in enumerate(ecg_samples)
+                    ],
+                    )
+                    print(
+                        f"[DB] ecg_samples affected rows={cursor.rowcount}",
+                        flush=True,
+                    )
+        print(
+            f"[DB] transaction committed: patient_id={reading.patient_id}",
+            flush=True,
+        )
+    except Exception as error:
+        print(
+            f"[DB] transaction rolled back: patient_id={reading.patient_id} "
+            f"error={error!r}",
+            flush=True,
+        )
+        raise
 
 
 def reading_from_payload(payload: Mapping[str, Any]) -> HealthReading:
@@ -193,13 +243,39 @@ def reading_from_payload(payload: Mapping[str, Any]) -> HealthReading:
     else:
         raise ValueError("recorded_at must be an ISO-8601 timestamp")
 
-    def optional_number(name: str) -> float | None:
-        value = payload.get(name)
+    def optional_number(name: str, *, alias: str | None = None) -> float | None:
+        value = payload.get(name, payload.get(alias) if alias else None)
         if value is None:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{name} must be a number")
         return float(value)
+
+    def required_bool_or_int(name: str, default: bool = False) -> bool:
+        value = payload.get(name, int(default))
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise ValueError(f"{name} must be 0 or 1")
+
+    heart_rate_valid = required_bool_or_int("hr_valid")
+    spo2_valid = required_bool_or_int("spo2_valid")
+    contact = required_bool_or_int("contact")
+
+    heart_rate = optional_number("heart_rate_bpm", alias="heart_rate")
+    spo2 = optional_number("spo2_percent", alias="spo2")
+    temperature = optional_number("temperature_c", alias="temp")
+
+    # The device sends sentinel -1 values when a sensor is invalid.
+    if not heart_rate_valid or heart_rate == -1:
+        heart_rate = None
+    if not spo2_valid or spo2 == -1:
+        spo2 = None
+
+    ecg_count = payload.get("ecg_count", 0)
+    if isinstance(ecg_count, bool) or not isinstance(ecg_count, int) or ecg_count < 0:
+        raise ValueError("ecg_count must be a non-negative integer")
 
     device_id = payload.get("device_id")
     if device_id is not None and (
@@ -224,9 +300,13 @@ def reading_from_payload(payload: Mapping[str, Any]) -> HealthReading:
         patient_id=patient_id.strip(),
         recorded_at=timestamp,
         device_id=device_id,
-        heart_rate_bpm=optional_number("heart_rate_bpm"),
-        spo2_percent=optional_number("spo2_percent"),
-        temperature_c=optional_number("temperature_c"),
+        heart_rate_bpm=heart_rate,
+        spo2_percent=spo2,
+        temperature_c=temperature,
+        contact=contact,
+        heart_rate_valid=heart_rate_valid,
+        spo2_valid=spo2_valid,
+        ecg_count=ecg_count,
         ecg=ecg,
         metadata=metadata,
     )
@@ -242,6 +322,10 @@ def payload_to_json(reading: HealthReading) -> str:
             "heart_rate_bpm": reading.heart_rate_bpm,
             "spo2_percent": reading.spo2_percent,
             "temperature_c": reading.temperature_c,
+            "contact": reading.contact,
+            "hr_valid": reading.heart_rate_valid,
+            "spo2_valid": reading.spo2_valid,
+            "ecg_count": reading.ecg_count,
             "ecg_samples": reading.ecg,
             "metadata": reading.metadata or {},
         }

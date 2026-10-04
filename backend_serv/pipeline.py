@@ -189,23 +189,33 @@ def calculate_features(
     config: PipelineConfig = PipelineConfig(),
 ) -> dict[str, float]:
     """Calculate the requested feature vector for one patient."""
+    heart_rate_samples = vitals.get("heart_rate_bpm", ())
+    spo2_samples = vitals.get("spo2_percent", ())
+    temperature_samples = vitals.get("temperature_c", ())
     cutoff_10s = now - WINDOW_10_SECONDS
     hr_10s = [
         sample
-        for sample in vitals["heart_rate_bpm"]
+        for sample in heart_rate_samples
         if sample.recorded_at >= cutoff_10s
     ]
     spo2_10s = [
         sample
-        for sample in vitals["spo2_percent"]
+        for sample in spo2_samples
         if sample.recorded_at >= cutoff_10s
     ]
-    temp_30s = vitals["temperature_c"]
-    all_spo2 = vitals["spo2_percent"]
-    all_hr = vitals["heart_rate_bpm"]
+    temp_30s = temperature_samples
+    all_spo2 = spo2_samples
+    all_hr = heart_rate_samples
     ecg = _ecg_features(ecg_samples)
     latest_time = max(
-        (sample.recorded_at for samples in vitals.values() for sample in samples),
+        (
+            *(
+                sample.recorded_at
+                for samples in vitals.values()
+                for sample in samples
+            ),
+            *(recorded_at for recorded_at, _ in ecg_samples),
+        ),
         default=now,
     )
     features = {
@@ -238,12 +248,20 @@ def calculate_features(
     features["num_abnormal_metrics"] = float(
         sum(
             (
-                features["hr_current"] < config.heart_rate_low
-                or features["hr_current"] > config.heart_rate_high,
-                features["spo2_current"] < config.spo2_low,
-                features["temp_current"] < config.temperature_low
-                or features["temp_current"] > config.temperature_high,
-                features["ecg_irregularity"] > config.ecg_irregularity_limit,
+                not math.isnan(features["hr_current"])
+                and (
+                    features["hr_current"] < config.heart_rate_low
+                    or features["hr_current"] > config.heart_rate_high
+                ),
+                not math.isnan(features["spo2_current"])
+                and features["spo2_current"] < config.spo2_low,
+                not math.isnan(features["temp_current"])
+                and (
+                    features["temp_current"] < config.temperature_low
+                    or features["temp_current"] > config.temperature_high
+                ),
+                not math.isnan(features["ecg_irregularity"])
+                and features["ecg_irregularity"] > config.ecg_irregularity_limit,
             )
         )
     )
@@ -310,7 +328,11 @@ def calculate_scores(
             min(1.0, features["ecg_irregularity"] / config.ecg_irregularity_limit)
             if not math.isnan(features["ecg_irregularity"])
             else 0.0,
-            1.0 - features["ecg_signal_quality"],
+            (
+                1.0 - features["ecg_signal_quality"]
+                if not math.isnan(features["ecg_hr"])
+                else 0.0
+            ),
             _severity(features["ecg_hr"], config.heart_rate_low, config.heart_rate_high),
         )
     )
@@ -356,7 +378,14 @@ def _fetch_inputs(
     with connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """
-            SELECT recorded_at, heart_rate_bpm, spo2_percent, temperature_c
+            SELECT
+                recorded_at,
+                heart_rate_bpm,
+                spo2_percent,
+                temperature_c,
+                contact,
+                heart_rate_valid,
+                spo2_valid
             FROM public.health_readings
             WHERE patient_id = %s
               AND recorded_at >= %s
@@ -365,11 +394,21 @@ def _fetch_inputs(
             (patient_id, now - WINDOW_30_SECONDS),
         )
         rows = cursor.fetchall()
+        has_contact = any(row["contact"] is True for row in rows)
         vitals = {
             name: [
                 VitalSample(row["recorded_at"], row[column])
                 for row in rows
-                if row[column] is not None
+                if has_contact
+                and row[column] is not None
+                and (
+                    column != "heart_rate_bpm"
+                    or row["heart_rate_valid"] is True
+                )
+                and (
+                    column != "spo2_percent"
+                    or row["spo2_valid"] is True
+                )
             ]
             for name, column in (
                 ("heart_rate_bpm", "heart_rate_bpm"),
@@ -387,7 +426,12 @@ def _fetch_inputs(
             """,
             (patient_id, now - WINDOW_30_SECONDS),
         )
-        ecg = [(row["recorded_at"], row["sample_value"]) for row in cursor.fetchall()]
+        ecg_rows = cursor.fetchall()
+        ecg = (
+            [(row["recorded_at"], row["sample_value"]) for row in ecg_rows]
+            if has_contact
+            else []
+        )
     return vitals, ecg
 
 

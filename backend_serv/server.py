@@ -5,7 +5,7 @@ from typing import Any
 from flask import Flask, jsonify, request
 from flask_sock import Sock
 
-from timescale_db import initialize_schema
+from timescale_db import initialize_schema, reading_from_payload, write_reading
 
 app = Flask(__name__)
 sock = Sock(app)
@@ -21,20 +21,18 @@ connected_devices_lock = Lock()
 @app.post("/sensor-data")
 def sensor_data():
     data = request.get_json(silent=True)
-    # print("Received sensor data:", data)
     if not isinstance(data, dict):
         return jsonify(error="request body must be a JSON object"), 400
 
-
-    # try:
-    #     print("Received sensor data:", data)
-    #     reading = reading_from_payload(data)
-    #     write_reading(reading)
-    # except ValueError as error:
-    #     return jsonify(error=str(error)), 400
-    # except Exception:
-    #     app.logger.exception("Unable to write sensor reading to TimescaleDB")
-    #     return jsonify(error="sensor reading could not be stored"), 503
+    try:
+        print("Received sensor data:", data)
+        reading = reading_from_payload(data)
+        write_reading(reading)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    except Exception:
+        app.logger.exception("Unable to write sensor reading to TimescaleDB")
+        return jsonify(error="sensor reading could not be stored"), 503
 
     return jsonify(status="stored"), 201
 
@@ -97,5 +95,5 @@ def send_to_device_http(device_id: str):
 
 
 if __name__ == "__main__":
-    # initialize_schema()
+    initialize_schema()
     app.run(host="0.0.0.0", port=5000)
